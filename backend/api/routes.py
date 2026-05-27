@@ -9,11 +9,13 @@ import json
 from backend.database.database import get_db
 from backend.models.models import Transaction, CategoryRule, Config, TransactionResponse, CategoryRuleResponse, LoginRequest, QuickAddRequest, CategoryRuleCreate, TransactionCreate
 from backend.parsing.parser import parse_csv_to_transactions
-from backend.parsing.pdf_parser import parse_pdf_statement
+from backend.parsing.pdf_parser import parse_pdf_statement, PasswordRequiredException as PdfPasswordRequired, IncorrectPasswordException as PdfIncorrectPassword
+from backend.parsing.excel_parser import parse_excel_statement, PasswordRequiredException as ExcelPasswordRequired, IncorrectPasswordException as ExcelIncorrectPassword
 from backend.cleaning.cleaner import clean_merchant_name
 from backend.categorization.categorizer import categorize_transaction, ml_categorizer_instance, CATEGORIES
 from backend.ml.predictor import get_predictions
 from backend.insights.insights_engine import generate_insights
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -58,6 +60,29 @@ def check_auth(ledgr_session: Optional[str] = Cookie(None)):
 
 # --- TRANSACTION UPLOAD & PARSING ---
 
+def prepare_preview_transactions(db: Session, parsed_txs: List[Dict]) -> List[Dict]:
+    preview_txs = []
+    for tx in parsed_txs:
+        clean_desc = clean_merchant_name(tx["raw_description"])
+        category, confidence, is_ai = categorize_transaction(db, tx["raw_description"], clean_desc)
+        
+        date_val = tx["date"]
+        if isinstance(date_val, (date, datetime)):
+            date_str = date_val.strftime("%Y-%m-%d")
+        else:
+            date_str = str(date_val)
+            
+        preview_txs.append({
+            "date": date_str,
+            "raw_description": tx["raw_description"],
+            "amount": float(tx["amount"]),
+            "type": tx["type"],
+            "category": category,
+            "confidence": float(confidence),
+            "is_ai_categorized": bool(is_ai)
+        })
+    return preview_txs
+
 def save_parsed_transactions(db: Session, parsed_txs: List[Dict], filename: str):
     new_txs = []
     for tx_data in parsed_txs:
@@ -94,6 +119,7 @@ def save_parsed_transactions(db: Session, parsed_txs: List[Dict], filename: str)
 @router.post("/upload", dependencies=[Depends(verify_session)])
 async def upload_statement(
     file: UploadFile = File(...),
+    password: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     contents = await file.read()
@@ -117,16 +143,37 @@ async def upload_statement(
                 "sample_rows": df.head(3).to_dict(orient="records")
             }
         
-        count = save_parsed_transactions(db, parsed_txs, filename)
-        return {"status": "success", "imported_count": count}
+        preview_txs = prepare_preview_transactions(db, parsed_txs)
+        return {"status": "preview", "transactions": preview_txs}
 
     elif filename.endswith(".pdf"):
-        parsed_txs = parse_pdf_statement(contents)
-        count = save_parsed_transactions(db, parsed_txs, filename)
-        return {"status": "success", "imported_count": count}
+        try:
+            parsed_txs = parse_pdf_statement(contents, password)
+        except (PdfPasswordRequired, ExcelPasswordRequired):
+            raise HTTPException(status_code=400, detail="PASSWORD_REQUIRED")
+        except (PdfIncorrectPassword, ExcelIncorrectPassword):
+            raise HTTPException(status_code=400, detail="PASSWORD_INCORRECT")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse PDF statement: {str(e)}")
+            
+        preview_txs = prepare_preview_transactions(db, parsed_txs)
+        return {"status": "preview", "transactions": preview_txs}
+        
+    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+        try:
+            parsed_txs = parse_excel_statement(contents, password)
+        except (PdfPasswordRequired, ExcelPasswordRequired):
+            raise HTTPException(status_code=400, detail="PASSWORD_REQUIRED")
+        except (PdfIncorrectPassword, ExcelIncorrectPassword):
+            raise HTTPException(status_code=400, detail="PASSWORD_INCORRECT")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse Excel statement: {str(e)}")
+            
+        preview_txs = prepare_preview_transactions(db, parsed_txs)
+        return {"status": "preview", "transactions": preview_txs}
         
     else:
-        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a CSV or PDF.")
+        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a CSV, PDF, or Excel file.")
 
 
 @router.post("/upload/map", dependencies=[Depends(verify_session)])
@@ -145,8 +192,73 @@ async def upload_with_mapping(
     if requires_map:
         raise HTTPException(status_code=400, detail="Mapping failed, unable to parse CSV rows.")
         
-    count = save_parsed_transactions(db, parsed_txs, file.filename or "mapped_statement.csv")
-    return {"status": "success", "imported_count": count}
+    preview_txs = prepare_preview_transactions(db, parsed_txs)
+    return {"status": "preview", "transactions": preview_txs}
+
+
+class ConfirmTransactionItem(BaseModel):
+    date: str
+    raw_description: str
+    amount: float
+    type: str
+    category: str
+
+class ConfirmUploadRequest(BaseModel):
+    filename: str
+    transactions: List[ConfirmTransactionItem]
+
+@router.post("/upload/confirm", dependencies=[Depends(verify_session)])
+def confirm_upload(
+    payload: ConfirmUploadRequest,
+    db: Session = Depends(get_db)
+):
+    new_txs = []
+    for item in payload.transactions:
+        try:
+            date_val = datetime.strptime(item.date, "%Y-%m-%d").date()
+        except Exception:
+            date_val = date.today()
+            
+        clean_desc = clean_merchant_name(item.raw_description)
+        pred_cat, pred_conf, pred_is_ai = categorize_transaction(db, item.raw_description, clean_desc)
+        
+        if item.category == pred_cat:
+            confidence = pred_conf
+            is_ai = pred_is_ai
+        else:
+            confidence = 1.0
+            is_ai = False
+            
+            # Auto-save override as category rule for future matching
+            rule_exists = db.query(CategoryRule).filter(CategoryRule.pattern == clean_desc).first()
+            if not rule_exists:
+                new_rule = CategoryRule(pattern=clean_desc, target_category=item.category, priority=1)
+                db.add(new_rule)
+                
+        tx = Transaction(
+            date=date_val,
+            raw_description=item.raw_description,
+            clean_description=clean_desc,
+            amount=item.amount,
+            type=item.type,
+            category=item.category,
+            confidence=confidence,
+            is_ai_categorized=is_ai,
+            source_file=payload.filename,
+            manual=False
+        )
+        db.add(tx)
+        new_txs.append(tx)
+        
+    db.commit()
+    
+    try:
+        ml_categorizer_instance.train_model(db)
+    except Exception:
+        pass
+        
+    return {"status": "success", "imported_count": len(new_txs)}
+
 
 
 # --- MANUAL TRANSACTION & QUICK-ADD ---

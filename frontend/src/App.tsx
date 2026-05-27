@@ -3,11 +3,9 @@ import axios from 'axios';
 import { 
   TrendingUp, 
   TrendingDown, 
-  ArrowUpRight, 
   DollarSign, 
   UploadCloud, 
   AlertCircle, 
-  ChevronRight, 
   Plus, 
   Search, 
   Edit3, 
@@ -15,11 +13,7 @@ import {
   Trash2, 
   Lock, 
   Sparkles, 
-  Settings, 
-  Calendar,
-  X,
-  CreditCard,
-  FileText
+  X
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -94,10 +88,18 @@ export default function App() {
   const [uploadSuccess, setUploadSuccess] = useState<string>('');
   const [uploadError, setUploadError] = useState<string>('');
   
+  // New: upload preview and password prompt states
+  const [selectedStatementFile, setSelectedStatementFile] = useState<File | null>(null);
+  const [passwordRequiredModal, setPasswordRequiredModal] = useState<boolean>(false);
+  const [statementPassword, setStatementPassword] = useState<string>('');
+  const [passwordModalError, setPasswordModalError] = useState<string>('');
+  const [showPreviewModal, setShowPreviewModal] = useState<boolean>(false);
+  const [previewTransactions, setPreviewTransactions] = useState<any[]>([]);
+  const [isConfirmingImport, setIsConfirmingImport] = useState<boolean>(false);
+  
   // CSV Mapping schema selector
   const [mappingRequired, setMappingRequired] = useState<boolean>(false);
   const [mappingColumns, setMappingColumns] = useState<string[]>([]);
-  const [mappingSampleRows, setMappingSampleRows] = useState<any[]>([]);
   const [mappingFile, setMappingFile] = useState<File | null>(null);
   const [mappingConfig, setMappingConfig] = useState({
     date: '',
@@ -208,14 +210,20 @@ export default function App() {
   };
 
   // 3. Statement file uploads
-  const handleFileUpload = async (file: File) => {
+  const handleFileUpload = async (file: File, pass?: string) => {
     setUploading(true);
     setUploadError('');
     setUploadSuccess('');
     setMappingRequired(false);
+    setSelectedStatementFile(file);
 
     const formData = new FormData();
     formData.append('file', file);
+    if (pass !== undefined) {
+      formData.append('password', pass);
+    } else if (statementPassword) {
+      formData.append('password', statementPassword);
+    }
 
     try {
       const res = await axios.post('/api/upload', formData, {
@@ -224,27 +232,31 @@ export default function App() {
       
       if (res.data.requires_mapping) {
         setMappingColumns(res.data.columns);
-        setMappingSampleRows(res.data.sample_rows);
         setMappingFile(file);
         setMappingRequired(true);
-        // Pre-fill initial mapper fields if columns match typical names
-        const cols = res.data.columns.map((c: string) => c.toLowerCase());
-        const findCol = (keys: string[]) => res.data.columns.find((c: string) => keys.some(k => c.toLowerCase().includes(k))) || '';
-        setMappingConfig({
-          date: findCol(['date', 'tx date', 'value']),
-          description: findCol(['desc', 'particular', 'narration', 'detail', 'payee', 'merchant']),
-          amount: findCol(['amount', 'value']),
-          debit: findCol(['debit', 'withdrawal']),
-          credit: findCol(['credit', 'deposit']),
-          type: findCol(['type', 'dr/cr'])
-        });
+      } else if (res.data.status === 'preview') {
+        setPreviewTransactions(res.data.transactions);
+        setShowPreviewModal(true);
+        setPasswordRequiredModal(false);
+        setStatementPassword('');
+        setPasswordModalError('');
       } else {
         setUploadSuccess(`Successfully imported ${res.data.imported_count} transactions!`);
         fetchDashboard();
         fetchTransactions();
       }
     } catch (err: any) {
-      setUploadError(err.response?.data?.detail || 'Failed to parse statement.');
+      const errMsg = err.response?.data?.detail;
+      if (errMsg === 'PASSWORD_REQUIRED' || errMsg === 'PASSWORD_INCORRECT') {
+        setPasswordRequiredModal(true);
+        if (errMsg === 'PASSWORD_INCORRECT') {
+          setPasswordModalError('Incorrect password. Please try again.');
+        } else {
+          setPasswordModalError('');
+        }
+      } else {
+        setUploadError(err.response?.data?.detail || 'Failed to parse statement.');
+      }
     } finally {
       setUploading(false);
     }
@@ -274,16 +286,64 @@ export default function App() {
       const res = await axios.post('/api/upload/map', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      setUploadSuccess(`Successfully imported ${res.data.imported_count} transactions!`);
-      setMappingRequired(false);
-      setMappingFile(null);
-      fetchDashboard();
-      fetchTransactions();
+      if (res.data.status === 'preview') {
+        setPreviewTransactions(res.data.transactions);
+        setShowPreviewModal(true);
+        setMappingRequired(false);
+        setMappingFile(null);
+      } else {
+        setUploadSuccess(`Successfully imported ${res.data.imported_count} transactions!`);
+        setMappingRequired(false);
+        setMappingFile(null);
+        fetchDashboard();
+        fetchTransactions();
+      }
     } catch (err: any) {
       setUploadError(err.response?.data?.detail || 'Mapping failed.');
     } finally {
       setUploading(false);
     }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!selectedStatementFile && previewTransactions.length === 0) return;
+    setIsConfirmingImport(true);
+    try {
+      const res = await axios.post('/api/upload/confirm', {
+        filename: selectedStatementFile?.name || 'statement',
+        transactions: previewTransactions
+      });
+      setUploadSuccess(`Successfully imported ${res.data.imported_count} transactions!`);
+      setShowPreviewModal(false);
+      setPreviewTransactions([]);
+      setSelectedStatementFile(null);
+      fetchDashboard();
+      fetchTransactions();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to confirm import.');
+    } finally {
+      setIsConfirmingImport(false);
+    }
+  };
+
+  const handleDiscardPreview = () => {
+    setPreviewTransactions([]);
+    setShowPreviewModal(false);
+    setSelectedStatementFile(null);
+    setUploadSuccess('');
+  };
+
+  const handlePreviewCategoryChange = (index: number, newCat: string) => {
+    setPreviewTransactions(prev => prev.map((tx, idx) => {
+      if (idx === index) {
+        return { ...tx, category: newCat };
+      }
+      return tx;
+    }));
+  };
+
+  const handlePreviewDelete = (index: number) => {
+    setPreviewTransactions(prev => prev.filter((_, idx) => idx !== index));
   };
 
   // 4. Quick NLP Add transaction
@@ -498,7 +558,7 @@ export default function App() {
               ref={fileInputRef}
               onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
               className="hidden"
-              accept=".csv,.pdf"
+              accept=".csv,.pdf,.xlsx,.xls"
             />
             {uploading ? (
               <div className="space-y-2">
@@ -624,6 +684,233 @@ export default function App() {
                   Parse & Import
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Password Required Modal */}
+        {passwordRequiredModal && (
+          <div className="fixed inset-0 bg-neutral-950/40 backdrop-blur-md flex items-center justify-center p-6 z-50 animate-fade-in font-sans">
+            <div className="w-full max-w-md bg-white border border-stone-200 shadow-premium rounded-2xl p-8 space-y-6">
+              <div className="text-center space-y-2">
+                <div className="w-12 h-12 bg-neutral-900 rounded-xl flex items-center justify-center mx-auto text-white">
+                  <Lock className="w-5 h-5 animate-pulse" />
+                </div>
+                <h3 className="text-xl font-bold tracking-tight text-neutral-900">Decryption Key Required</h3>
+                <p className="text-sm text-neutral-500">
+                  The file <code className="bg-stone-100 px-1 py-0.5 rounded font-mono text-xs">{selectedStatementFile?.name}</code> is password-protected.
+                </p>
+              </div>
+
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (selectedStatementFile) {
+                    handleFileUpload(selectedStatementFile, statementPassword);
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-2">Statement Password</label>
+                  <input 
+                    type="password" 
+                    value={statementPassword}
+                    onChange={(e) => setStatementPassword(e.target.value)}
+                    placeholder="Enter password..."
+                    className="w-full px-4 py-3 bg-stone-50 border border-neutral-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:bg-white text-sm transition-all"
+                    required
+                    autoFocus
+                  />
+                </div>
+                
+                {passwordModalError && (
+                  <div className="flex items-center gap-2 text-xs text-rose-600 bg-rose-50 border border-rose-100 p-3 rounded-lg">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{passwordModalError}</span>
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setPasswordRequiredModal(false);
+                      setSelectedStatementFile(null);
+                      setStatementPassword('');
+                      setPasswordModalError('');
+                    }}
+                    className="flex-1 py-3 border border-neutral-200 hover:bg-stone-50 rounded-xl font-medium text-sm transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 py-3 bg-neutral-950 hover:bg-neutral-800 text-white rounded-xl font-medium text-sm transition-all"
+                  >
+                    Unlock & Parse
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Statements Preview Modal */}
+        {showPreviewModal && (
+          <div className="fixed inset-0 bg-neutral-950/30 backdrop-blur-sm flex items-center justify-center p-4 md:p-8 z-50 animate-fade-in font-sans">
+            <div className="w-full max-w-5xl bg-white border border-stone-200 shadow-premium rounded-2xl flex flex-col max-h-[85vh] overflow-hidden animate-scale-up">
+              
+              {/* Header */}
+              <div className="px-6 py-4 border-b flex items-center justify-between bg-stone-50/50">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-bold text-neutral-900">Statement Transactions Preview</h3>
+                    <span className="text-xs bg-neutral-200 text-neutral-800 px-2 py-0.5 rounded-full font-mono max-w-[200px] truncate">
+                      {selectedStatementFile?.name || 'statement.pdf'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-500">
+                    Review and verify extracted transaction records. Edit category labels or delete items before adding to the main ledger.
+                  </p>
+                </div>
+                <button 
+                  onClick={handleDiscardPreview} 
+                  className="text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 p-1.5 rounded-lg transition-all"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Aggregates Summary Ribbon */}
+              <div className="grid grid-cols-3 divide-x border-b bg-white">
+                <div className="p-4 text-center">
+                  <span className="block text-xs text-neutral-400 font-medium">Record Count</span>
+                  <span className="text-xl font-bold text-neutral-900">{previewTransactions.length} items</span>
+                </div>
+                <div className="p-4 text-center">
+                  <span className="block text-xs text-neutral-400 font-medium">Total Spend (Debits)</span>
+                  <span className="text-xl font-bold text-rose-600">
+                    ₹{previewTransactions
+                      .filter(t => t.type === 'debit')
+                      .reduce((sum, t) => sum + t.amount, 0)
+                      .toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="p-4 text-center">
+                  <span className="block text-xs text-neutral-400 font-medium">Total Received (Credits)</span>
+                  <span className="text-xl font-bold text-emerald-600">
+                    ₹{previewTransactions
+                      .filter(t => t.type === 'credit')
+                      .reduce((sum, t) => sum + t.amount, 0)
+                      .toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Transactions Table */}
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                {previewTransactions.length === 0 ? (
+                  <div className="py-12 text-center text-sm text-neutral-400">
+                    All transactions have been deleted. Click Discard or close to exit.
+                  </div>
+                ) : (
+                  <div className="min-w-full inline-block align-middle">
+                    <table className="min-w-full divide-y divide-neutral-200">
+                      <thead>
+                        <tr className="text-left text-xs font-semibold text-neutral-400 uppercase tracking-wider">
+                          <th className="py-3 px-2">Date</th>
+                          <th className="py-3 px-2">Narration</th>
+                          <th className="py-3 px-2">Type</th>
+                          <th className="py-3 px-2 text-right">Amount</th>
+                          <th className="py-3 px-2">Category Label</th>
+                          <th className="py-3 px-2 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-100 text-sm">
+                        {previewTransactions.map((tx, idx) => (
+                          <tr key={idx} className="hover:bg-stone-50/50 transition-all">
+                            <td className="py-3.5 px-2 whitespace-nowrap text-neutral-600 font-mono text-xs">
+                              {tx.date}
+                            </td>
+                            <td className="py-3.5 px-2 font-medium text-neutral-900 max-w-[280px] truncate" title={tx.raw_description}>
+                              {tx.raw_description}
+                            </td>
+                            <td className="py-3.5 px-2 whitespace-nowrap">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                tx.type === 'credit' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-rose-50 text-rose-700 border border-rose-100'
+                              }`}>
+                                {tx.type === 'credit' ? 'Credit' : 'Debit'}
+                              </span>
+                            </td>
+                            <td className={`py-3.5 px-2 text-right whitespace-nowrap font-mono font-semibold ${
+                              tx.type === 'credit' ? 'text-emerald-600' : 'text-neutral-800'
+                            }`}>
+                              ₹{tx.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="py-3.5 px-2">
+                              <div className="flex items-center gap-2">
+                                <span 
+                                  className="w-2.5 h-2.5 rounded-full shrink-0" 
+                                  style={{ backgroundColor: CATEGORY_COLORS[tx.category as keyof typeof CATEGORY_COLORS] || '#6b7280' }} 
+                                />
+                                <select
+                                  value={tx.category}
+                                  onChange={(e) => handlePreviewCategoryChange(idx, e.target.value)}
+                                  className="bg-stone-50 border border-stone-200 text-xs rounded-lg px-2.5 py-1 focus:ring-1 focus:ring-neutral-900 focus:outline-none"
+                                >
+                                  {CATEGORIES.map(cat => (
+                                    <option key={cat} value={cat}>{cat}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-2 text-center">
+                              <button 
+                                onClick={() => handlePreviewDelete(idx)}
+                                className="text-neutral-400 hover:text-rose-600 p-1 rounded transition-all"
+                                title="Remove transaction"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Actions */}
+              <div className="px-6 py-4 border-t flex items-center justify-between bg-stone-50/50">
+                <button 
+                  onClick={handleDiscardPreview} 
+                  className="px-5 py-2.5 border border-stone-200 rounded-xl text-sm font-semibold text-neutral-500 hover:bg-stone-100 transition-all"
+                  disabled={isConfirmingImport}
+                >
+                  Discard Import
+                </button>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={handleConfirmImport} 
+                    className="px-6 py-2.5 bg-neutral-950 hover:bg-neutral-800 text-white rounded-xl font-semibold text-sm shadow hover:shadow-premium transition-all flex items-center gap-2"
+                    disabled={isConfirmingImport || previewTransactions.length === 0}
+                  >
+                    {isConfirmingImport ? (
+                      <>
+                        <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        Confirm & Import Ledger
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
             </div>
           </div>
         )}

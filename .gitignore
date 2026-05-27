@@ -30,4 +30,5 @@ backend/ledgr.db
 # Secrets & Local Configurations
 .env
 backend/.env
-frontend/.env
+frontend/.
+# powershell.cmd
