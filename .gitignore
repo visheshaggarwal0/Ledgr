@@ -1,3 +1,33 @@
+# Bank statements and test datasets (ignore statement PDFs, spreadsheets, and CSV uploads)
 /AccountStatement_28052026_021032.pdf
 /AccountStatement_28052026_021043.xlsx
 /gpay_statement_20260401_20260430.pdf
+*.pdf
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Node / Frontend
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Databases (SQLite local instances)
+*.db
+ledgr.db
+backend/ledgr.db
+
+# Secrets & Local Configurations
+.env
+backend/.env
+frontend/.env
