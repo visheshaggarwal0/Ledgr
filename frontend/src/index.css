@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply selection:bg-neutral-200 selection:text-neutral-900;
+  }
+}
+
+/* Custom micro-animations for dashboard interactive states */
+.transition-all-custom {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
